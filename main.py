@@ -35,9 +35,7 @@ CRC32C_RE = re.compile(r"^[0-9a-f]{8}$")
 #
 # bucket = one or more characters other than /
 # object = one or more characters after /
-URI_RE = re.compile(
-    r"^gs://[^/]+/[^/]+$"
-)
+URI_RE = re.compile(r"gs://[^/\s]+/[^\s]+")
 
 TIME_RE = re.compile(
     r"^"
