@@ -27,6 +27,7 @@ ROW_KEYS = {
 }
 
 GENERATION_RE = re.compile(r"^[0-9]+$")
+
 CRC32C_RE = re.compile(r"^[0-9a-f]{8}$")
 
 # Assignment form:
@@ -222,8 +223,6 @@ def canonical_text(value):
 
     value = value.lower()
 
-    # Python split() handles Unicode whitespace.
-    # Joining with ASCII space performs trim + collapse.
     return " ".join(
         value.split()
     )
@@ -356,14 +355,6 @@ def row_is_valid(row):
 
 def parse_jsonl(content):
 
-    """
-    Returns:
-
-        rows
-        jsonl_invalid
-        schema_invalid
-    """
-
     lines = content.split("\n")
 
     non_blank = []
@@ -397,26 +388,17 @@ def parse_jsonl(content):
     for line in non_blank:
 
         try:
-
-            value = json.loads(
-                line
-            )
+            value = json.loads(line)
 
         except Exception:
-
             jsonl_invalid = True
             continue
 
-        if not row_is_valid(
-            value
-        ):
-
+        if not row_is_valid(value):
             schema_invalid = True
             continue
 
-        rows.append(
-            value
-        )
+        rows.append(value)
 
     return (
         rows,
@@ -431,10 +413,11 @@ def parse_jsonl(content):
 
 def validate_object(obj):
 
-    if not isinstance(
-        obj,
-        dict,
-    ):
+    # --------------------------------------------------------
+    # NON-OBJECT
+    # --------------------------------------------------------
+
+    if not isinstance(obj, dict):
 
         return {
             "accepted": False,
@@ -452,21 +435,20 @@ def validate_object(obj):
     # URI
     # --------------------------------------------------------
 
-    uri = obj.get(
-        "uri"
+    uri = obj.get("uri")
+
+    uri_valid = (
+        isinstance(uri, str)
+        and URI_RE.fullmatch(uri) is not None
     )
 
-    if (
-        not isinstance(uri, str)
-        or URI_RE.fullmatch(uri) is None
-    ):
-
+    if not uri_valid:
         reasons.append(
             "URI_INVALID"
         )
 
     # --------------------------------------------------------
-    # GENERATION
+    # GENERATION IDENTITY
     # --------------------------------------------------------
 
     generation = obj.get(
@@ -497,22 +479,23 @@ def validate_object(obj):
         ) is not None
     )
 
-    if not generation_valid:
+    # IMPORTANT:
+    # Only one GENERATION_INVALID reason is emitted even
+    # when both generation fields are invalid/missing.
+    if (
+        not generation_valid
+        or not fetched_generation_valid
+    ):
         reasons.append(
             "GENERATION_INVALID"
         )
 
-    if not fetched_generation_valid:
-        reasons.append(
-            "GENERATION_INVALID"
-        )
-
+    # Mismatch is meaningful only when both values are valid.
     if (
         generation_valid
         and fetched_generation_valid
         and generation != fetched_generation
     ):
-
         reasons.append(
             "GENERATION_MISMATCH"
         )
@@ -554,12 +537,7 @@ def validate_object(obj):
             "CRC32C_INVALID"
         )
 
-    # CRC mismatch is checked only when
-    # content is a string and CRC syntax is valid.
-    if (
-        content_valid
-        and crc_syntax_valid
-    ):
+    elif content_valid:
 
         actual_crc = crc32c_hex(
             content.encode("utf-8")
@@ -572,7 +550,7 @@ def validate_object(obj):
             )
 
     # --------------------------------------------------------
-    # SCHEMA ID
+    # SCHEMA
     # --------------------------------------------------------
 
     schema_id = obj.get(
@@ -704,9 +682,7 @@ def deduplicate(objects):
             groups.setdefault(
                 key,
                 [],
-            ).append(
-                row
-            )
+            ).append(row)
 
     retained = []
     rejected = []
@@ -750,9 +726,7 @@ def deduplicate(objects):
 def determine_split(row):
 
     digest = hashlib.sha256(
-        row["entity"].encode(
-            "utf-8"
-        )
+        row["entity"].encode("utf-8")
     ).digest()
 
     bucket = digest[0] % 10
@@ -788,9 +762,7 @@ def word_set(value):
             or category.startswith("N")
         ):
 
-            current.append(
-                char
-            )
+            current.append(char)
 
         else:
 
@@ -845,9 +817,7 @@ def sort_split(rows):
         rows,
         key=lambda row: (
             row["id"].encode("utf-8"),
-            row_json(row).encode(
-                "utf-8"
-            ),
+            row_json(row).encode("utf-8"),
         ),
     )
 
@@ -859,9 +829,7 @@ def serialize_split(rows):
     for row in rows:
 
         output.extend(
-            row_json(row).encode(
-                "utf-8"
-            )
+            row_json(row).encode("utf-8")
         )
 
         output.extend(
@@ -890,22 +858,17 @@ def validate_policy(policy):
         )
 
     min_time = parse_timestamp(
-        policy.get(
-            "minTime"
-        )
+        policy.get("minTime")
     )
 
     max_time = parse_timestamp(
-        policy.get(
-            "maxTime"
-        )
+        policy.get("maxTime")
     )
 
     threshold = policy.get(
         "contaminationThreshold"
     )
 
-    # JSON booleans are not thresholds.
     threshold_valid = (
         type(threshold) in (
             int,
@@ -918,6 +881,7 @@ def validate_policy(policy):
     )
 
     if min_time is None:
+
         return (
             False,
             None,
@@ -926,6 +890,7 @@ def validate_policy(policy):
         )
 
     if max_time is None:
+
         return (
             False,
             None,
@@ -934,6 +899,7 @@ def validate_policy(policy):
         )
 
     if not threshold_valid:
+
         return (
             False,
             None,
@@ -942,6 +908,7 @@ def validate_policy(policy):
         )
 
     if min_time > max_time:
+
         return (
             False,
             None,
@@ -990,12 +957,8 @@ def merge_rejected_rows(rejected):
     return sorted(
         result,
         key=lambda item: (
-            item["id"].encode(
-                "utf-8"
-            ),
-            compact_json(item).encode(
-                "utf-8"
-            ),
+            item["id"].encode("utf-8"),
+            compact_json(item).encode("utf-8"),
         ),
     )
 
@@ -1013,23 +976,9 @@ async def build_corpus(
     # REQUEST PARSING
     # ========================================================
 
-    # Endpoint accepts application/json only.
-    content_type = (
-        request.headers
-        .get("content-type", "")
-        .split(";")[0]
-        .strip()
-        .lower()
-    )
-
-    if content_type != "application/json":
-
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "INVALID_INPUT"
-            },
-        )
+    # Do NOT require an exact Content-Type header.
+    # The endpoint attempts to parse JSON and returns
+    # INVALID_INPUT when parsing fails.
 
     try:
 
@@ -1133,6 +1082,10 @@ async def build_corpus(
 
     # ========================================================
     # LINEAGE
+    #
+    # Only fully valid objects appear here.
+    #
+    # Row-level rejection later does NOT remove lineage.
     # ========================================================
 
     lineage = []
@@ -1220,21 +1173,15 @@ async def build_corpus(
 
         if split == "train":
 
-            train.append(
-                row
-            )
+            train.append(row)
 
         elif split == "validation":
 
-            validation.append(
-                row
-            )
+            validation.append(row)
 
         else:
 
-            test.append(
-                row
-            )
+            test.append(row)
 
     # ========================================================
     # CONTAMINATION
@@ -1313,17 +1260,9 @@ async def build_corpus(
     # SORT SPLITS
     # ========================================================
 
-    train = sort_split(
-        train
-    )
-
-    validation = sort_split(
-        validation
-    )
-
-    test = sort_split(
-        test
-    )
+    train = sort_split(train)
+    validation = sort_split(validation)
+    test = sort_split(test)
 
     # ========================================================
     # DIGESTS
@@ -1348,9 +1287,7 @@ async def build_corpus(
     rejected_objects.sort(
         key=lambda item: (
             (
-                item["uri"].encode(
-                    "utf-8"
-                )
+                item["uri"].encode("utf-8")
                 if isinstance(
                     item["uri"],
                     str,
@@ -1377,9 +1314,7 @@ async def build_corpus(
 
     lineage.sort(
         key=lambda item: (
-            item["uri"].encode(
-                "utf-8"
-            ),
+            item["uri"].encode("utf-8"),
             compact_json(item).encode(
                 "utf-8"
             ),
