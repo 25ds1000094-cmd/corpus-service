@@ -28,6 +28,8 @@ CRC32C_RE = re.compile(r"^[0-9a-f]{8}$")
 # gs://bucket/object
 # bucket: non-empty, no slash/whitespace
 # object: non-empty, no whitespace
+#
+# Object names may themselves contain '/'.
 URI_RE = re.compile(r"^gs://[^/\s]+/[^\s]+$")
 
 TIME_RE = re.compile(
@@ -52,6 +54,10 @@ def compact_json(value):
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def utf8(value):
+    return value.encode("utf-8")
 
 
 def sorted_reasons(reasons):
@@ -271,14 +277,14 @@ def parse_jsonl(content):
         jsonl_invalid,
         schema_invalid
 
-    Only LF separates JSONL records. A CR immediately before LF
-    is treated as part of CRLF and removed.
-
     Blank lines are ignored.
 
-    Any malformed JSON line => JSONL_INVALID.
-    Any parsed line with an invalid row schema => SCHEMA_INVALID.
-    Empty/blank-only content => SCHEMA_INVALID.
+    Malformed JSON lines produce JSONL_INVALID.
+
+    Parsed lines with an invalid row schema produce
+    SCHEMA_INVALID.
+
+    Empty/blank-only content produces SCHEMA_INVALID.
     """
 
     rows = []
@@ -326,8 +332,6 @@ def parse_jsonl(content):
 
 def validate_object(obj):
 
-    # A non-object cannot have a usable URI/generation/CRC
-    # identity. It is a schema failure.
     if not isinstance(obj, dict):
         return {
             "accepted": False,
@@ -374,16 +378,24 @@ def validate_object(obj):
         ) is not None
     )
 
-    # One logical GENERATION_INVALID code.
-    # reason-code arrays are explicitly deduplicated.
+    # One GENERATION_INVALID code regardless of whether one
+    # or both generation fields are invalid.
     if not generation_valid or not fetched_generation_valid:
         reasons.append("GENERATION_INVALID")
 
-    # Mismatch only applies when both supplied values are
-    # syntactically valid decimal strings.
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # GENERATION_MISMATCH applies whenever BOTH fields were
+    # supplied and their supplied values differ.
+    #
+    # This is independent of whether either value is a valid
+    # decimal generation string.
+    # --------------------------------------------------------
+
     if (
-        generation_valid
-        and fetched_generation_valid
+        "generation" in obj
+        and "fetchedGeneration" in obj
         and generation != fetched_generation
     ):
         reasons.append("GENERATION_MISMATCH")
@@ -690,14 +702,18 @@ def merge_rejected_rows(rejected):
         by_id.setdefault(
             row_id,
             [],
-        ).extend(item["reasonCodes"])
+        ).extend(
+            item["reasonCodes"]
+        )
 
     result = []
 
     for row_id, reasons in by_id.items():
         result.append({
             "id": row_id,
-            "reasonCodes": sorted_reasons(reasons),
+            "reasonCodes": sorted_reasons(
+                reasons
+            ),
         })
 
     return sorted(
@@ -718,10 +734,6 @@ async def build_corpus(request: Request):
 
     # --------------------------------------------------------
     # REQUEST PARSING
-    # --------------------------------------------------------
-    #
-    # The contract is application/json. Do not silently accept
-    # arbitrary content types as valid application/json requests.
     # --------------------------------------------------------
 
     content_type = (
@@ -774,7 +786,10 @@ async def build_corpus(request: Request):
     rejected_objects = []
 
     for supplied_object in supplied_objects:
-        result = validate_object(supplied_object)
+
+        result = validate_object(
+            supplied_object
+        )
 
         if result["accepted"]:
             accepted_objects.append(result)
@@ -785,10 +800,6 @@ async def build_corpus(request: Request):
 
     # --------------------------------------------------------
     # LINEAGE
-    # --------------------------------------------------------
-    #
-    # Only objects that passed ALL object-level validation
-    # contribute lineage.
     # --------------------------------------------------------
 
     lineage = []
@@ -830,6 +841,7 @@ async def build_corpus(request: Request):
         inside = []
 
         for row in retained:
+
             event_time = parse_timestamp(
                 row["eventTime"]
             )
@@ -838,12 +850,14 @@ async def build_corpus(request: Request):
                 event_time < min_time
                 or event_time > max_time
             ):
+
                 rejected_rows.append({
                     "id": row["id"],
                     "reasonCodes": [
                         "OUT_OF_WINDOW"
                     ],
                 })
+
             else:
                 inside.append(row)
 
@@ -881,41 +895,59 @@ async def build_corpus(request: Request):
 
     def contaminated(row):
 
-        target = word_set(row["text"])
+        target = word_set(
+            row["text"]
+        )
 
         for other in train_words:
-            if jaccard(target, other) >= threshold:
+
+            if jaccard(
+                target,
+                other,
+            ) >= threshold:
                 return True
 
         return False
+
+    # --------------------------------------------------------
+    # VALIDATION CONTAMINATION
+    # --------------------------------------------------------
 
     clean_validation = []
 
     for row in validation:
 
         if contaminated(row):
+
             rejected_rows.append({
                 "id": row["id"],
                 "reasonCodes": [
                     "TRAIN_CONTAMINATION"
                 ],
             })
+
         else:
             clean_validation.append(row)
 
     validation = clean_validation
+
+    # --------------------------------------------------------
+    # TEST CONTAMINATION
+    # --------------------------------------------------------
 
     clean_test = []
 
     for row in test:
 
         if contaminated(row):
+
             rejected_rows.append({
                 "id": row["id"],
                 "reasonCodes": [
                     "TRAIN_CONTAMINATION"
                 ],
             })
+
         else:
             clean_test.append(row)
 
