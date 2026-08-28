@@ -27,15 +27,13 @@ ROW_KEYS = {
 }
 
 GENERATION_RE = re.compile(r"^[0-9]+$")
-
 CRC32C_RE = re.compile(r"^[0-9a-f]{8}$")
 
 # Assignment form:
 # gs://bucket/object
-#
-# bucket = one or more characters other than /
-# object = one or more characters after /
-URI_RE = re.compile(r"gs://[^/\s]+/[^\s]+")
+URI_RE = re.compile(
+    r"^gs://[^/\s]+/[^\s]+$"
+)
 
 TIME_RE = re.compile(
     r"^"
@@ -126,18 +124,11 @@ def parse_timestamp(value):
     # --------------------------------------------------------
 
     if offset == "Z":
-
         tz = timezone.utc
 
     else:
-
-        offset_hour = int(
-            offset[1:3]
-        )
-
-        offset_minute = int(
-            offset[4:6]
-        )
+        offset_hour = int(offset[1:3])
+        offset_minute = int(offset[4:6])
 
         if offset_hour > 14:
             return None
@@ -169,11 +160,8 @@ def parse_timestamp(value):
     # --------------------------------------------------------
 
     if fraction is None:
-
         milliseconds = 0
-
     else:
-
         milliseconds = int(
             fraction.ljust(3, "0")
         )
@@ -183,7 +171,6 @@ def parse_timestamp(value):
     # --------------------------------------------------------
 
     try:
-
         dt = datetime(
             year,
             month,
@@ -196,7 +183,6 @@ def parse_timestamp(value):
         )
 
     except ValueError:
-
         return None
 
     return dt.astimezone(
@@ -376,13 +362,6 @@ def parse_jsonl(content):
         rows
         jsonl_invalid
         schema_invalid
-
-    IMPORTANT:
-    If even one non-blank line is malformed, the object
-    receives JSONL_INVALID and is rejected.
-
-    If even one successfully parsed line has the wrong row
-    shape, the object receives SCHEMA_INVALID and is rejected.
     """
 
     lines = content.split("\n")
@@ -391,7 +370,7 @@ def parse_jsonl(content):
 
     for line in lines:
 
-        # JSONL commonly arrives as CRLF.
+        # CRLF support.
         if line.endswith("\r"):
             line = line[:-1]
 
@@ -426,7 +405,6 @@ def parse_jsonl(content):
         except Exception:
 
             jsonl_invalid = True
-
             continue
 
         if not row_is_valid(
@@ -434,7 +412,6 @@ def parse_jsonl(content):
         ):
 
             schema_invalid = True
-
             continue
 
         rows.append(
@@ -453,16 +430,6 @@ def parse_jsonl(content):
 # ============================================================
 
 def validate_object(obj):
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # If an item isn't an object, the only sensible object-level
-    # classification available is SCHEMA_INVALID.
-    #
-    # We do NOT manufacture URI/GENERATION/CRC failures for
-    # fields that don't exist.
-    # --------------------------------------------------------
 
     if not isinstance(
         obj,
@@ -531,19 +498,15 @@ def validate_object(obj):
     )
 
     if not generation_valid:
-
         reasons.append(
             "GENERATION_INVALID"
         )
 
     if not fetched_generation_valid:
-
         reasons.append(
             "GENERATION_INVALID"
         )
 
-    # Mismatch only makes sense when both values
-    # are valid decimal strings.
     if (
         generation_valid
         and fetched_generation_valid
@@ -591,11 +554,8 @@ def validate_object(obj):
             "CRC32C_INVALID"
         )
 
-    # EXACTLY as assignment specifies:
-    #
-    # check mismatch only if:
-    # - content is string
-    # - CRC syntax is valid
+    # CRC mismatch is checked only when
+    # content is a string and CRC syntax is valid.
     if (
         content_valid
         and crc_syntax_valid
@@ -625,7 +585,6 @@ def validate_object(obj):
             "SCHEMA_INVALID"
         )
 
-    # Non-string content.
     if not content_valid:
 
         reasons.append(
@@ -755,9 +714,7 @@ def deduplicate(objects):
     for group in groups.values():
 
         # Highest revision first.
-        #
-        # For equal revision:
-        # smallest UTF-8 ID first.
+        # Equal revision -> smallest UTF-8 ID.
         ordered = sorted(
             group,
             key=lambda row: (
@@ -948,7 +905,7 @@ def validate_policy(policy):
         "contaminationThreshold"
     )
 
-    # JSON booleans are not contamination thresholds.
+    # JSON booleans are not thresholds.
     threshold_valid = (
         type(threshold) in (
             int,
@@ -1004,9 +961,7 @@ def validate_policy(policy):
 # REJECTED ROW MERGE
 # ============================================================
 
-def merge_rejected_rows(
-    rejected
-):
+def merge_rejected_rows(rejected):
 
     by_id = {}
 
@@ -1057,6 +1012,24 @@ async def build_corpus(
     # ========================================================
     # REQUEST PARSING
     # ========================================================
+
+    # Endpoint accepts application/json only.
+    content_type = (
+        request.headers
+        .get("content-type", "")
+        .split(";")[0]
+        .strip()
+        .lower()
+    )
+
+    if content_type != "application/json":
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "INVALID_INPUT"
+            },
+        )
 
     try:
 
@@ -1160,10 +1133,6 @@ async def build_corpus(
 
     # ========================================================
     # LINEAGE
-    #
-    # Only fully valid objects appear here.
-    #
-    # Row-level rejection later does NOT remove lineage.
     # ========================================================
 
     lineage = []
