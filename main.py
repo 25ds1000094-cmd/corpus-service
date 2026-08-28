@@ -24,20 +24,17 @@ ROW_KEYS = {
 GENERATION_RE = re.compile(r"^[0-9]+$")
 CRC32C_RE = re.compile(r"^[0-9a-f]{8}$")
 
-# gs://bucket/object
+# gs://<bucket>/<object>
 #
 # Bucket:
 #   - non-empty
-#   - no slash
-#   - no whitespace
+#   - cannot contain /
+#   - cannot contain whitespace
 #
 # Object:
 #   - non-empty
-#   - may contain '/'
-#   - no whitespace
-#
-# This deliberately validates the URI structure rather than
-# accepting arbitrary gs:// strings.
+#   - may contain /
+#   - cannot contain whitespace
 URI_RE = re.compile(
     r"^gs://([^/\s]+)/([^\s]+)$"
 )
@@ -54,7 +51,7 @@ TIME_RE = re.compile(
 
 
 # ============================================================
-# JSON HELPERS
+# JSON
 # ============================================================
 
 def compact_json(value):
@@ -147,7 +144,9 @@ def parse_timestamp(value):
     if fraction is None:
         milliseconds = 0
     else:
-        milliseconds = int(fraction.ljust(3, "0"))
+        milliseconds = int(
+            fraction.ljust(3, "0")
+        )
 
     try:
         dt = datetime(
@@ -185,8 +184,14 @@ def canonical_timestamp(value):
 # ============================================================
 
 def canonical_text(value):
-    value = unicodedata.normalize("NFKC", value)
+    value = unicodedata.normalize(
+        "NFKC",
+        value,
+    )
     value = value.lower()
+
+    # Python's split() uses Unicode whitespace,
+    # producing exactly one ASCII space.
     return " ".join(value.split())
 
 
@@ -226,7 +231,9 @@ def crc32c_hex(data):
     return f"{crc32c(data):08x}"
 
 
-assert crc32c_hex(b"123456789") == "e3069283"
+assert crc32c_hex(
+    b"123456789"
+) == "e3069283"
 
 
 # ============================================================
@@ -282,10 +289,12 @@ def parse_jsonl(content):
 
     for line in content.split("\n"):
 
-        # Treat CRLF as a line ending.
+        # CRLF support: remove only the CR immediately
+        # preceding LF.
         if line.endswith("\r"):
             line = line[:-1]
 
+        # Blank JSONL records are ignored.
         if line.strip() == "":
             continue
 
@@ -293,7 +302,7 @@ def parse_jsonl(content):
 
         try:
             value = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError, TypeError):
             jsonl_invalid = True
             continue
 
@@ -303,6 +312,7 @@ def parse_jsonl(content):
 
         rows.append(value)
 
+    # Every file must contain at least one row.
     if not found_non_blank:
         schema_invalid = True
 
@@ -314,37 +324,12 @@ def parse_jsonl(content):
 
 
 # ============================================================
-# URI VALIDATION
-# ============================================================
-
-def valid_uri(value):
-    if type(value) is not str:
-        return False
-
-    match = URI_RE.fullmatch(value)
-
-    if match is None:
-        return False
-
-    bucket = match.group(1)
-    object_name = match.group(2)
-
-    if bucket == "":
-        return False
-
-    if object_name == "":
-        return False
-
-    return True
-
-
-# ============================================================
 # OBJECT VALIDATION
 # ============================================================
 
 def validate_object(obj):
 
-    # A non-object has no usable supplied URI.
+    # A non-object cannot expose a supplied URI.
     if type(obj) is not dict:
         return {
             "accepted": False,
@@ -362,58 +347,67 @@ def validate_object(obj):
     # URI
     # --------------------------------------------------------
 
-    uri_present = "uri" in obj
-    uri = obj["uri"] if uri_present else None
+    uri = obj.get("uri")
 
-    if not valid_uri(uri):
+    uri_valid = (
+        type(uri) is str
+        and URI_RE.fullmatch(uri) is not None
+    )
+
+    if not uri_valid:
         reasons.append("URI_INVALID")
 
     # --------------------------------------------------------
-    # GENERATION
+    # GENERATIONS
     # --------------------------------------------------------
 
-    generation_present = "generation" in obj
-    fetched_present = "fetchedGeneration" in obj
-
-    generation = (
-        obj["generation"]
-        if generation_present
-        else None
-    )
-
-    fetched_generation = (
-        obj["fetchedGeneration"]
-        if fetched_present
-        else None
-    )
+    generation = obj.get("generation")
+    fetched_generation = obj.get("fetchedGeneration")
 
     generation_valid = (
-        generation_present
-        and type(generation) is str
+        type(generation) is str
         and GENERATION_RE.fullmatch(
             generation
         ) is not None
     )
 
     fetched_generation_valid = (
-        fetched_present
-        and type(fetched_generation) is str
+        type(fetched_generation) is str
         and GENERATION_RE.fullmatch(
             fetched_generation
         ) is not None
     )
 
-    if (
-        not generation_valid
-        or not fetched_generation_valid
-    ):
+    #
+    # The specification defines GENERATION_INVALID as:
+    # a non-decimal generation field.
+    #
+    # Missing/non-string fields therefore also fail this
+    # validation because they are not decimal strings.
+    #
+    if not generation_valid:
         reasons.append("GENERATION_INVALID")
 
-    # If both values were supplied and differ,
-    # they are a mismatch regardless of validity.
+    if not fetched_generation_valid:
+        reasons.append("GENERATION_INVALID")
+
+    #
+    # IMPORTANT:
+    #
+    # Mismatch is an identity/integrity failure and should be
+    # determined from the two supplied values, not from their
+    # numerical interpretation.
+    #
+    # Therefore:
+    #   "001" vs "1" -> mismatch
+    #   "abc" vs "def" -> mismatch
+    #   missing vs supplied -> not mismatch
+    #
+    # This is intentionally separate from GENERATION_INVALID.
+    #
     if (
-        generation_present
-        and fetched_present
+        "generation" in obj
+        and "fetchedGeneration" in obj
         and generation != fetched_generation
     ):
         reasons.append("GENERATION_MISMATCH")
@@ -422,32 +416,18 @@ def validate_object(obj):
     # CONTENT
     # --------------------------------------------------------
 
-    content_present = "content" in obj
-    content = (
-        obj["content"]
-        if content_present
-        else None
-    )
+    content = obj.get("content")
 
-    content_valid = (
-        content_present
-        and type(content) is str
-    )
+    content_valid = type(content) is str
 
     # --------------------------------------------------------
     # CRC32C
     # --------------------------------------------------------
 
-    crc_present = "crc32c" in obj
-    supplied_crc = (
-        obj["crc32c"]
-        if crc_present
-        else None
-    )
+    supplied_crc = obj.get("crc32c")
 
     crc_valid = (
-        crc_present
-        and type(supplied_crc) is str
+        type(supplied_crc) is str
         and CRC32C_RE.fullmatch(
             supplied_crc
         ) is not None
@@ -455,7 +435,13 @@ def validate_object(obj):
 
     if not crc_valid:
         reasons.append("CRC32C_INVALID")
-    elif content_valid:
+
+    #
+    # CRC mismatch is checked ONLY when:
+    #   1. CRC syntax is valid
+    #   2. content is actually a string
+    #
+    if crc_valid and content_valid:
         actual_crc = crc32c_hex(
             content.encode("utf-8")
         )
@@ -466,20 +452,10 @@ def validate_object(obj):
             )
 
     # --------------------------------------------------------
-    # SCHEMA / CONTENT
+    # SCHEMA ID / CONTENT
     # --------------------------------------------------------
 
-    schema_present = "schemaId" in obj
-    schema_id = (
-        obj["schemaId"]
-        if schema_present
-        else None
-    )
-
-    if (
-        not schema_present
-        or schema_id != "training-v1"
-    ):
+    if obj.get("schemaId") != "training-v1":
         reasons.append("SCHEMA_INVALID")
 
     if not content_valid:
@@ -500,19 +476,22 @@ def validate_object(obj):
         ) = parse_jsonl(content)
 
         if jsonl_invalid:
-            reasons.append("JSONL_INVALID")
+            reasons.append(
+                "JSONL_INVALID"
+            )
 
         if schema_invalid:
-            reasons.append("SCHEMA_INVALID")
+            reasons.append(
+                "SCHEMA_INVALID"
+            )
 
     # --------------------------------------------------------
-    # FINAL RESULT
+    # FINAL OBJECT RESULT
     # --------------------------------------------------------
 
     reasons = sorted_reasons(reasons)
 
     if reasons:
-
         return {
             "accepted": False,
             "rejection": {
@@ -530,7 +509,7 @@ def validate_object(obj):
         "uri": uri,
         "generation": generation,
         "crc32c": supplied_crc,
-        "schemaId": schema_id,
+        "schemaId": "training-v1",
         "rows": rows,
     }
 
@@ -542,12 +521,16 @@ def validate_object(obj):
 def canonicalize_row(row):
     return {
         "id": row["id"],
-        "entity": canonical_text(row["entity"]),
+        "entity": canonical_text(
+            row["entity"]
+        ),
         "eventTime": canonical_timestamp(
             row["eventTime"]
         ),
         "revision": row["revision"],
-        "text": canonical_text(row["text"]),
+        "text": canonical_text(
+            row["text"]
+        ),
     }
 
 
@@ -556,6 +539,7 @@ def canonicalize_row(row):
 # ============================================================
 
 def deduplicate(objects):
+
     groups = {}
 
     for obj in objects:
@@ -593,6 +577,7 @@ def deduplicate(objects):
         retained.append(winner)
 
         for loser in ordered[1:]:
+
             rejected.append({
                 "id": loser["id"],
                 "reasonCodes": [
@@ -629,20 +614,22 @@ def determine_split(row):
 # ============================================================
 
 def word_set(value):
-    value = value.lower()
 
     result = set()
     current = []
 
-    for char in value:
+    for char in value.lower():
 
-        category = unicodedata.category(char)
+        category = unicodedata.category(
+            char
+        )
 
         if (
             category.startswith("L")
             or category.startswith("N")
         ):
             current.append(char)
+
         else:
             if current:
                 result.add(
@@ -686,6 +673,7 @@ def row_json(row):
 
 
 def sort_split(rows):
+
     return sorted(
         rows,
         key=lambda row: (
@@ -731,8 +719,9 @@ def validate_policy(policy):
 
     threshold_valid = (
         type(threshold) in (int, float)
-        and not isinstance(threshold, bool)
-        and math.isfinite(float(threshold))
+        and math.isfinite(
+            float(threshold)
+        )
         and 0 <= threshold <= 1
     )
 
@@ -790,15 +779,13 @@ def merge_rejected_rows(rejected):
         result,
         key=lambda item: (
             item["id"].encode("utf-8"),
-            compact_json(item).encode(
-                "utf-8"
-            ),
+            compact_json(item).encode("utf-8"),
         ),
     )
 
 
 # ============================================================
-# MAIN ENDPOINT
+# ENDPOINT
 # ============================================================
 
 @app.post("/build-corpus")
@@ -836,9 +823,6 @@ async def build_corpus(request: Request):
     if type(body["objects"]) is not list:
         return invalid_input()
 
-    policy = body["policy"]
-    supplied_objects = body["objects"]
-
     # --------------------------------------------------------
     # POLICY
     # --------------------------------------------------------
@@ -848,34 +832,37 @@ async def build_corpus(request: Request):
         min_time,
         max_time,
         threshold,
-    ) = validate_policy(policy)
+    ) = validate_policy(
+        body["policy"]
+    )
 
     # --------------------------------------------------------
-    # OBJECT VALIDATION
+    # OBJECTS
     # --------------------------------------------------------
 
     accepted_objects = []
     rejected_objects = []
 
-    for supplied_object in supplied_objects:
+    for supplied_object in body["objects"]:
 
         result = validate_object(
             supplied_object
         )
 
         if result["accepted"]:
-            accepted_objects.append(result)
+
+            accepted_objects.append(
+                result
+            )
+
         else:
+
             rejected_objects.append(
                 result["rejection"]
             )
 
     # --------------------------------------------------------
     # LINEAGE
-    # --------------------------------------------------------
-    #
-    # Only completely valid objects appear here.
-    # Row-level rejection does not remove lineage.
     # --------------------------------------------------------
 
     lineage = []
@@ -890,7 +877,7 @@ async def build_corpus(request: Request):
         })
 
     # --------------------------------------------------------
-    # DEDUPLICATION
+    # DEDUPLICATE
     # --------------------------------------------------------
 
     retained, rejected_rows = deduplicate(
@@ -937,6 +924,7 @@ async def build_corpus(request: Request):
                 })
 
             else:
+
                 inside.append(row)
 
         retained = inside
@@ -979,13 +967,10 @@ async def build_corpus(request: Request):
 
         for other in train_words:
 
-            if (
-                jaccard(
-                    target,
-                    other,
-                )
-                >= threshold
-            ):
+            if jaccard(
+                target,
+                other,
+            ) >= threshold:
                 return True
 
         return False
@@ -1004,6 +989,7 @@ async def build_corpus(request: Request):
             })
 
         else:
+
             clean_validation.append(row)
 
     validation = clean_validation
@@ -1022,12 +1008,13 @@ async def build_corpus(request: Request):
             })
 
         else:
+
             clean_test.append(row)
 
     test = clean_test
 
     # --------------------------------------------------------
-    # SORT SPLITS
+    # SORT
     # --------------------------------------------------------
 
     train = sort_split(train)
@@ -1051,7 +1038,7 @@ async def build_corpus(request: Request):
     )
 
     # --------------------------------------------------------
-    # SORT REJECTED OBJECTS
+    # REJECTED OBJECTS
     # --------------------------------------------------------
 
     rejected_objects.sort(
@@ -1061,14 +1048,12 @@ async def build_corpus(request: Request):
                 if type(item["uri"]) is str
                 else b""
             ),
-            compact_json(item).encode(
-                "utf-8"
-            ),
+            compact_json(item).encode("utf-8"),
         )
     )
 
     # --------------------------------------------------------
-    # SORT REJECTED ROWS
+    # REJECTED ROWS
     # --------------------------------------------------------
 
     rejected_rows = merge_rejected_rows(
@@ -1076,15 +1061,13 @@ async def build_corpus(request: Request):
     )
 
     # --------------------------------------------------------
-    # SORT LINEAGE
+    # LINEAGE
     # --------------------------------------------------------
 
     lineage.sort(
         key=lambda item: (
             item["uri"].encode("utf-8"),
-            compact_json(item).encode(
-                "utf-8"
-            ),
+            compact_json(item).encode("utf-8"),
         )
     )
 
